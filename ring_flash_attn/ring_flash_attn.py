@@ -3,6 +3,8 @@ import torch.distributed as dist
 from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
 from .utils import RingComm, update_out_and_lse, get_default_args
 
+import deepspeed
+from deepspeed.runtime.zero.partition_parameters import CUDAQuantizer
 
 def ring_flash_attn_forward(
     process_group,
@@ -18,6 +20,9 @@ def ring_flash_attn_forward(
 ):
     comm = RingComm(process_group)
 
+    quantizer = CUDAQuantizer()
+    orig_dtype = q.dtype
+
     out = None
     lse = None
 
@@ -25,7 +30,15 @@ def ring_flash_attn_forward(
 
     for step in range(comm.world_size):
         if step + 1 != comm.world_size:
-            next_k, next_v = comm.send_recv_kv(k, v)
+
+            k_quantized, k_scale = quantizer.quantize(k)
+            v_quantized, v_scale = quantizer.quantize(v)
+
+            next_k_quantized: torch.Tensor = comm.send_recv(k_quantized)
+            next_k_scale: torch.Tensor = comm.send_recv(k_scale)
+            next_v_quantized: torch.Tensor = comm.send_recv(v_quantized)
+            next_v_scale: torch.Tensor = comm.send_recv(v_scale)
+            comm.commit()
 
         if not causal or step <= comm.rank:
             params = get_default_args(_flash_attn_forward).copy()
@@ -60,9 +73,10 @@ def ring_flash_attn_forward(
 
         if step + 1 != comm.world_size:
             comm.wait()
-            k, v = next_k, next_v
-
-    out = out.to(q.dtype)
+            k = quantizer.dequantize(next_k_quantized, next_k_scale).to(orig_dtype)
+            v = quantizer.dequantize(next_v_quantized, next_v_scale).to(orig_dtype)
+            
+    out = out.to(orig_dtype)
     lse = lse.squeeze(dim=-1).transpose(1, 2)
     return out, lse
 
