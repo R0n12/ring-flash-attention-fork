@@ -13,7 +13,8 @@ def benchmark(f, num_iter=100, forward_only=True, log=True, profile=False):
     dtype = torch.bfloat16
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{rank}")
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
     batch_size = 1
